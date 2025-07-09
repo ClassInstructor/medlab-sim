@@ -105,7 +105,8 @@ export default function App() {
 
     // --- Create Renderer ---
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-    renderer.setClearColor(0xf3f3f7);
+    renderer.setClearColor(0xff0000); // bright red for testing
+
     renderer.setSize(width, height);
     mountNode.appendChild(renderer.domElement);
 
