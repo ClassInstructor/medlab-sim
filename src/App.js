@@ -1,733 +1,1124 @@
-import React, { useRef, useEffect, useState } from "react";
-import * as THREE from "three";
-import { OrbitControls } from "three/examples/jsm/controls/OrbitControls";
-import * as Tone from "tone"; // For sound effects
+import React, { useRef, useEffect, useState, useCallback } from 'react';
+import * as Tone from 'tone'; // For sound effects
 
-// Helper: Generate simple sound using Tone.js
-const playSound = (type = "click") => {
-  if (!window.ToneStarted) {
-    Tone.start();
-    window.ToneStarted = true;
-  }
-  let synth = new Tone.Synth().toDestination();
-  if (type === "click") synth.triggerAttackRelease("C6", "8n", undefined, 0.2);
-  else if (type === "success") synth.triggerAttackRelease("E6", "16n", undefined, 0.6);
-  else if (type === "error") synth.triggerAttackRelease("C4", "16n", undefined, 0.4);
-  else if (type === "pour") synth.triggerAttackRelease("A5", "16n", undefined, 0.2);
-  else if (type === "beep") synth.triggerAttackRelease("G5", "32n", undefined, 0.7);
-};
-
-const PROCEDURE = [
-  {
-    id: 0,
-    title: "Wear Lab Coat and Safety Goggles",
-    instruction: "Put on your lab coat and safety goggles before handling any equipment.",
-    validate: (state) => state.wearingLabCoat && state.wearingGoggles,
-    error: "You must wear your lab coat and goggles first.",
-  },
-  {
-    id: 1,
-    title: "Calibrate Analytical Balance",
-    instruction: "Click the balance to calibrate (zero) it before weighing any objects.",
-    validate: (state) => state.balanceCalibrated,
-    error: "Calibrate the analytical balance first by clicking it.",
-  },
-  {
-    id: 2,
-    title: "Measure 50ml of Water",
-    instruction:
-      "Pick up the graduated cylinder, drag it to the sink, and fill to the 50ml mark. Then move it to the bench.",
-    validate: (state) => state.cylinderFilled && state.cylinderAtBench,
-    error:
-      "You must use the graduated cylinder to measure water, fill it at the sink, and place it on the bench.",
-  },
-  {
-    id: 3,
-    title: "Weigh the Filled Cylinder",
-    instruction:
-      "Drag the filled graduated cylinder to the analytical balance to weigh it. Read the display.",
-    validate: (state) => state.cylinderWeighed,
-    error: "Weigh the filled graduated cylinder on the analytical balance.",
-  },
-  {
-    id: 4,
-    title: "Dispose of Waste Properly",
-    instruction:
-      "Dispose of any chemical waste in the correct waste bin before finishing.",
-    validate: (state) => state.wasteDisposed,
-    error: "Dispose of chemical waste before completing the procedure.",
-  },
-];
-
-export default function App() {
-  // ========== State Management ==========
-  const mountRef = useRef();
-  const [simState, setSimState] = useState({
-    wearingLabCoat: false,
-    wearingGoggles: false,
-    balanceCalibrated: false,
-    cylinderPicked: false,
-    cylinderFilled: false,
-    cylinderAtBench: false,
-    cylinderWeighed: false,
-    wasteDisposed: false,
-    dragging: null,
-    dragOffset: new THREE.Vector3(),
-    selectedObj: null,
-  });
+// Main App Component for the Medical Lab Simulation
+function App() {
+  // State for simulation logic
   const [currentStep, setCurrentStep] = useState(0);
-  const [feedback, setFeedback] = useState("");
-  const [showModal, setShowModal] = useState(false);
+  const [score, setScore] = useState(0);
+  const [feedbackMessage, setFeedbackMessage] = useState('');
+  const [isCorrectAction, setIsCorrectAction] = useState(null); // true, false, or null
+  const [activeTool, setActiveTool] = useState(null); // Tool currently "held" for drag-and-drop
+  const [bloodDropVisible, setBloodDropVisible] = useState(false);
+  const [slideHasBlood, setSlideHasBlood] = useState(false);
+  const [smearQuality, setSmearQuality] = useState(null); // null, 'good', 'too_thick', 'too_thin'
+  const [showMicroscopeView, setShowMicroscopeView] = useState(false);
 
-  // 3D object refs and scene state
-  const threeRefs = useRef({
-    renderer: null,
-    scene: null,
-    camera: null,
-    controls: null,
-    raycaster: null,
-    intersects: [],
-    objects: {},
-    mouse: new THREE.Vector2(),
-    draggingObj: null,
-    dragOffset: new THREE.Vector3(),
-    dragPlane: new THREE.Plane(),
-    pointerDown: false,
-    lastPointer: [0, 0],
-    canvasRect: null,
-  });
+  // Refs for interactive areas/elements
+  const fingerRef = useRef(null);
+  const slideRef = useRef(null);
+  const spreaderSlideRef = useRef(null);
+  const smearCanvasRef = useRef(null);
+  const microscopeViewCanvasRef = useRef(null);
 
-  // ========== React Effect: Initialize Three.js ==========
+  // Sound effects setup
+  const clickSynth = useRef(null);
+  const successSynth = useRef(null);
+  const errorSynth = useRef(null);
+  const dropSound = useRef(null);
+  const swabSound = useRef(null);
+
   useEffect(() => {
-    const mountNode = mountRef.current; // FIX: For ref warning
-    let width = mountNode.clientWidth;
-    let height = mountNode.clientHeight;
+    // Initialize Tone.js synths with cooler sounds
+    clickSynth.current = new Tone.PolySynth(Tone.Synth, {
+      oscillator: { type: 'triangle' },
+      envelope: { attack: 0.005, decay: 0.1, sustain: 0.05, release: 0.1 },
+      volume: -10
+    }).toDestination(); // Soft, quick click
 
-    // --- Create Renderer ---
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-    renderer.setClearColor(0xff0000); // bright red for testing
+    successSynth.current = new Tone.PolySynth(Tone.Synth, {
+      oscillator: { type: 'sine' },
+      envelope: { attack: 0.01, decay: 0.2, sustain: 0.1, release: 0.5 },
+      volume: -8
+    }).toDestination(); // Gentle chime
 
-    renderer.setSize(width, height);
-    mountNode.appendChild(renderer.domElement);
+    errorSynth.current = new Tone.Synth({
+      oscillator: { type: 'square' },
+      envelope: { attack: 0.01, decay: 0.1, sustain: 0.01, release: 0.2 },
+      volume: -15
+    }).toDestination(); // Subtle, low buzz
 
-    // --- Scene, Camera ---
-    // eslint-disable-next-line no-unused-vars
-    const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(60, width / height, 0.1, 1000);
-    camera.position.set(3.5, 2.3, 4.5);
-    camera.lookAt(0, 1, 0);
+    dropSound.current = new Tone.PolySynth(Tone.Synth, {
+      oscillator: { type: 'sine' },
+      envelope: { attack: 0.01, decay: 0.3, sustain: 0.01, release: 0.2 },
+      volume: -12
+    }).toDestination(); // Liquid plink
 
-    // --- Lighting ---
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.85);
-    scene.add(ambientLight);
-    const dirLight = new THREE.DirectionalLight(0xffffff, 0.7);
-    dirLight.position.set(5, 8, 6);
-    scene.add(dirLight);
+    swabSound.current = new Tone.NoiseSynth({
+      noise: { type: 'white' },
+      envelope: { attack: 0.005, decay: 0.1, sustain: 0, release: 0.1 },
+      volume: -25
+    }).toDestination(); // Very subtle swab sound
 
-    // --- Orbit Controls ---
-    // eslint-disable-next-line no-unused-vars
-    const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enablePan = false;
-    controls.enableDamping = true;
-    controls.minDistance = 3.2;
-    controls.maxDistance = 8;
-    controls.maxPolarAngle = Math.PI / 2.2;
-    controls.dampingFactor = 0.13;
-
-    // --- Raycaster for object selection ---
-    const raycaster = new THREE.Raycaster();
-
-    // --- Lab Room ---
-    const floor = new THREE.Mesh(
-      new THREE.PlaneGeometry(9, 7),
-      new THREE.MeshLambertMaterial({ color: 0xe0e5ee })
-    );
-    floor.rotation.x = -Math.PI / 2;
-    floor.position.y = 0;
-    scene.add(floor);
-
-    // Walls (three simple)
-    const wallMat = new THREE.MeshLambertMaterial({ color: 0xdbe8ee });
-    ["left", "right", "back"].forEach((dir) => {
-      const wall = new THREE.Mesh(
-        new THREE.PlaneGeometry(
-          dir === "back" ? 9 : 7,
-          2.8
-        ),
-        wallMat
-      );
-      if (dir === "left") {
-        wall.rotation.y = Math.PI / 2;
-        wall.position.set(-4.5, 1.4, 0);
-      } else if (dir === "right") {
-        wall.rotation.y = -Math.PI / 2;
-        wall.position.set(4.5, 1.4, 0);
-      } else if (dir === "back") {
-        wall.position.set(0, 1.4, -3.5);
-      }
-      scene.add(wall);
-    });
-
-    // --- Lab Benches ---
-    function addBench(id, x, z, w = 2.4, h = 0.9, d = 0.7, color = 0xc9d5e5) {
-      const bench = new THREE.Mesh(
-        new THREE.BoxGeometry(w, 0.08, d),
-        new THREE.MeshLambertMaterial({ color })
-      );
-      bench.position.set(x, h, z);
-      scene.add(bench);
-      threeRefs.current.objects[id] = bench;
-    }
-    addBench("bench_main", 0, 0.6, 2.4, 0.87, 0.72);
-    addBench("bench_side", 2.7, -1, 1.8, 0.88, 0.6);
-
-    // --- Sink ---
-    const sink = new THREE.Mesh(
-      new THREE.BoxGeometry(0.65, 0.11, 0.5),
-      new THREE.MeshLambertMaterial({ color: 0x9fc9dd })
-    );
-    sink.position.set(-2.2, 0.93, -1.5);
-    scene.add(sink);
-    threeRefs.current.objects["sink"] = sink;
-
-    // Sink faucet
-    const faucet = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.03, 0.03, 0.27, 16),
-      new THREE.MeshLambertMaterial({ color: 0x888c94 })
-    );
-    faucet.position.set(-2.2, 1.1, -1.65);
-    scene.add(faucet);
-
-    // --- Analytical Balance ---
-    const balance = new THREE.Group();
-    const balanceBase = new THREE.Mesh(
-      new THREE.BoxGeometry(0.32, 0.07, 0.23),
-      new THREE.MeshLambertMaterial({ color: 0x757a7e })
-    );
-    const balancePlate = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.08, 0.08, 0.012, 32),
-      new THREE.MeshLambertMaterial({ color: 0xe4e6ea })
-    );
-    balancePlate.position.set(0, 0.048, 0.02);
-    balance.add(balanceBase);
-    balance.add(balancePlate);
-    balance.position.set(1.08, 0.94, 0.22);
-    balance.name = "balance";
-    scene.add(balance);
-    threeRefs.current.objects["balance"] = balance;
-
-    // --- Graduated Cylinder (Draggable) ---
-    const cylinder = new THREE.Group();
-    const cylBody = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.045, 0.048, 0.29, 24),
-      new THREE.MeshPhongMaterial({ color: 0xcbe0fa, transparent: true, opacity: 0.56 })
-    );
-    const cylBase = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.06, 0.06, 0.02, 16),
-      new THREE.MeshPhongMaterial({ color: 0xcccccc })
-    );
-    cylBase.position.set(0, -0.145, 0);
-    cylinder.add(cylBody);
-    cylinder.add(cylBase);
-    cylinder.position.set(-1.1, 0.98, 0.32);
-    cylinder.name = "cylinder";
-    scene.add(cylinder);
-    threeRefs.current.objects["cylinder"] = cylinder;
-
-    // --- Beaker (not used in this demo) ---
-    const beaker = new THREE.Group();
-    const beakerBody = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.06, 0.064, 0.13, 24, 1, true),
-      new THREE.MeshPhongMaterial({ color: 0xf7f6fa, transparent: true, opacity: 0.52 })
-    );
-    const beakerBase = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.063, 0.063, 0.018, 16),
-      new THREE.MeshPhongMaterial({ color: 0xf7f6fa })
-    );
-    beakerBase.position.set(0, -0.056, 0);
-    beaker.add(beakerBody);
-    beaker.add(beakerBase);
-    beaker.position.set(-0.75, 0.98, -0.1);
-    beaker.name = "beaker";
-    scene.add(beaker);
-    threeRefs.current.objects["beaker"] = beaker;
-
-    // --- Pipette ---
-    const pipette = new THREE.Group();
-    const pipBody = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.01, 0.012, 0.17, 16),
-      new THREE.MeshLambertMaterial({ color: 0xe6dcd1 })
-    );
-    pipBody.position.set(0, 0, 0);
-    const pipTip = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.004, 0.007, 0.03, 12),
-      new THREE.MeshLambertMaterial({ color: 0xcccccc })
-    );
-    pipTip.position.set(0, -0.1, 0);
-    pipette.add(pipBody);
-    pipette.add(pipTip);
-    pipette.position.set(-0.5, 1.01, 0.25);
-    pipette.name = "pipette";
-    scene.add(pipette);
-    threeRefs.current.objects["pipette"] = pipette;
-
-    // --- Waste Bin ---
-    const bin = new THREE.Group();
-    const binBody = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.10, 0.11, 0.28, 24, 1, true),
-      new THREE.MeshPhongMaterial({ color: 0x2b2e39 })
-    );
-    const binBase = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.11, 0.11, 0.018, 20),
-      new THREE.MeshPhongMaterial({ color: 0x4a505c })
-    );
-    binBase.position.set(0, -0.13, 0);
-    bin.add(binBody);
-    bin.add(binBase);
-    bin.position.set(2.35, 0.97, 0.49);
-    bin.name = "wastebin";
-    scene.add(bin);
-    threeRefs.current.objects["wastebin"] = bin;
-
-    // --- Resize Handler ---
-    const onWindowResize = () => {
-      let width = mountNode.clientWidth;
-      let height = mountNode.clientHeight;
-      renderer.setSize(width, height);
-      camera.aspect = width / height;
-      camera.updateProjectionMatrix();
-    };
-    window.addEventListener("resize", onWindowResize, false);
-
-    // --- Store refs ---
-    threeRefs.current = {
-      ...threeRefs.current,
-      renderer,
-      scene,
-      camera,
-      controls,
-      raycaster,
-      objects: threeRefs.current.objects,
-      mouse: new THREE.Vector2(),
-    };
-
-    // --- Render Loop ---
-    const animate = () => {
-      controls.update();
-      renderer.render(scene, camera);
-      requestAnimationFrame(animate);
-    };
-    animate();
-
-    // --- Clean up on Unmount ---
+    // Cleanup on unmount
     return () => {
-      renderer.dispose();
-      window.removeEventListener("resize", onWindowResize);
-      if (mountNode && renderer.domElement.parentNode === mountNode) {
-        mountNode.removeChild(renderer.domElement);
-      }
+      clickSynth.current?.dispose();
+      successSynth.current?.dispose();
+      errorSynth.current?.dispose();
+      dropSound.current?.dispose();
+      swabSound.current?.dispose();
     };
   }, []);
 
-  // ========== React Effect: 3D Mouse & Touch Interactions ==========
+  const playClickSound = useCallback(() => {
+    if (clickSynth.current) {
+      clickSynth.current.triggerAttackRelease('C5', '8n');
+    }
+  }, []);
+
+  const playSuccessSound = useCallback(() => {
+    if (successSynth.current) {
+      successSynth.current.triggerAttackRelease(['G4', 'C5', 'E5'], '8n'); // Ascending chime
+    }
+  }, []);
+
+  const playErrorSound = useCallback(() => {
+    if (errorSynth.current) {
+      errorSynth.current.triggerAttackRelease('C2', '8n'); // Low thud
+    }
+  }, []);
+
+  const playDropSound = useCallback(() => {
+    if (dropSound.current) {
+      dropSound.current.triggerAttackRelease('G3', '8n');
+    }
+  }, []);
+
+  const playSwabSound = useCallback(() => {
+    if (swabSound.current) {
+      swabSound.current.triggerAttackRelease('16n');
+    }
+  }, []);
+
+  // Define the lab procedure steps for Blood Smear Preparation
+  const labProcedureSteps = [
+    {
+      id: 'intro',
+      instruction: 'Welcome to the Virtual Lab! Today, we will learn how to prepare a blood smear. Click "Start Simulation" to begin.',
+      action: null,
+      target: null,
+      nextStep: 'gather_equipment',
+    },
+    {
+      id: 'gather_equipment',
+      instruction: 'Step 1: Gather necessary equipment. Click on the Alcohol Swab to pick it up.',
+      action: 'pick_up_tool',
+      target: 'alcohol_swab',
+      nextStep: 'clean_finger',
+    },
+    {
+      id: 'clean_finger',
+      instruction: 'Step 2: Clean the patient\'s finger. Drag the Alcohol Swab to the finger icon.',
+      action: 'use_tool_on_target',
+      tool: 'alcohol_swab',
+      target: 'finger',
+      nextStep: 'prick_finger',
+    },
+    {
+      id: 'prick_finger',
+      instruction: 'Step 3: Prick the finger. Click on the Lancet to pick it up.',
+      action: 'pick_up_tool',
+      target: 'lancet',
+      nextStep: 'apply_lancet',
+    },
+    {
+      id: 'apply_lancet',
+      instruction: 'Step 4: Apply the lancet to the finger. Drag the Lancet to the finger icon to simulate pricking.',
+      action: 'use_tool_on_target',
+      tool: 'lancet',
+      target: 'finger',
+      nextStep: 'wipe_first_drop',
+    },
+    {
+      id: 'wipe_first_drop',
+      instruction: 'Step 5: Wipe away the first drop of blood. Click on the Alcohol Swab to pick it up.',
+      action: 'pick_up_tool',
+      target: 'alcohol_swab',
+      nextStep: 'wipe_blood',
+    },
+    {
+      id: 'wipe_blood',
+      instruction: 'Step 6: Drag the Alcohol Swab to the blood drop icon to wipe it away.',
+      action: 'use_tool_on_target',
+      tool: 'alcohol_swab',
+      target: 'blood_drop',
+      nextStep: 'wait_for_second_drop', // NEW STEP ADDED HERE
+    },
+    {
+      id: 'wait_for_second_drop',
+      instruction: 'Step 7: A second blood drop is forming. Please wait...',
+      action: 'auto_advance_blood_drop', // Custom action for auto-progression and state change
+      target: null,
+      nextStep: 'collect_second_drop',
+    },
+    {
+      id: 'collect_second_drop',
+      instruction: 'Step 8: Collect the second drop of blood onto a clean glass slide. Click on the Clean Slide to pick it up.',
+      action: 'pick_up_tool',
+      target: 'clean_slide',
+      nextStep: 'collect_blood_on_slide',
+    },
+    {
+      id: 'collect_blood_on_slide',
+      instruction: 'Step 9: Drag the Clean Slide to the blood drop icon to collect the sample.',
+      action: 'use_tool_on_target',
+      tool: 'clean_slide',
+      target: 'blood_drop',
+      nextStep: 'prepare_smear',
+    },
+    {
+      id: 'prepare_smear',
+      instruction: 'Step 10: Prepare the blood smear. Click on the Spreader Slide to pick it up.',
+      action: 'pick_up_tool',
+      target: 'spreader_slide',
+      nextStep: 'perform_smear',
+    },
+    {
+      id: 'perform_smear',
+      instruction: 'Step 11: With the Spreader Slide active, click the "Create Smear" button to prepare the blood smear.',
+      action: 'click_create_smear', // Action is now a simple click
+      target: 'create_smear_button', // Target is the button itself
+      nextStep: 'air_dry',
+    },
+    {
+      id: 'air_dry',
+      instruction: 'Step 12: Allow the blood smear to air dry completely. (Click "Next" when ready).',
+      action: 'next_step_button',
+      target: 'next_button',
+      nextStep: 'microscope_observation',
+    },
+    {
+      id: 'microscope_observation',
+      instruction: 'Step 13: Observe the prepared smear under the microscope. Evaluate its quality.',
+      action: 'view_microscope',
+      target: 'microscope_icon',
+      nextStep: 'procedure_complete',
+    },
+    {
+      id: 'procedure_complete',
+      instruction: 'Procedure Complete! You have successfully completed the Blood Smear Preparation simulation. Now, watch a real-life demonstration.',
+      action: 'next_step_button',
+      target: 'next_button',
+      nextStep: 'video_demonstration', // Transition to video
+    },
+    {
+      id: 'video_demonstration',
+      instruction: 'Watch this video demonstrating the blood smear preparation process. Click "Next" when done.',
+      action: 'next_step_button',
+      target: 'next_button',
+      nextStep: 'mcq_challenge', // Transition to MCQ
+    },
+    {
+      id: 'mcq_challenge',
+      instruction: 'Test your knowledge! Answer the question below based on what you\'ve learned and observed.',
+      action: 'mcq_handled_internally', // This action is handled by MCQChallenge component directly
+      target: null, // No specific target for main App to handle
+      nextStep: 'final_completion', // Transition to final completion
+    },
+    {
+      id: 'final_completion',
+      instruction: 'Congratulations! You have completed the entire module.',
+      action: null,
+      target: null,
+      nextStep: null,
+    }
+  ];
+
+  // --- Utility Functions for Drawing on Canvas (for Smear and Microscope View) ---
+  const drawSmear = useCallback((quality) => {
+    const canvas = smearCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height); // Clear previous smear
+
+    const width = canvas.width;
+    const height = canvas.height;
+
+    // Draw the base slide
+    ctx.fillStyle = '#f0f0f0';
+    ctx.fillRect(0, 0, width, height);
+    ctx.strokeStyle = '#ccc';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(0, 0, width, height);
+
+    // Draw the blood smear based on quality
+    ctx.fillStyle = 'rgba(139, 0, 0, 0.7)'; // Dark red for blood
+
+    if (quality === 'good') {
+      // Good smear: feathered edge, even thickness
+      ctx.beginPath();
+      ctx.moveTo(width * 0.1, height * 0.9);
+      ctx.bezierCurveTo(width * 0.3, height * 0.7, width * 0.7, height * 0.3, width * 0.9, height * 0.1);
+      ctx.lineTo(width * 0.9, height * 0.9);
+      ctx.closePath();
+      ctx.fill();
+
+      // Simulate even spread
+      for (let i = 0; i < 50; i++) {
+        const x = Math.random() * (width * 0.8) + width * 0.1;
+        const y = Math.random() * (height * 0.8) + height * 0.1;
+        const radius = Math.random() * 2 + 1;
+        ctx.beginPath();
+        ctx.arc(x, y, radius, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    } else if (quality === 'too_thick') {
+      // Too thick smear: blobby, uneven
+      ctx.beginPath();
+      ctx.arc(width / 2, height / 2, width * 0.4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.font = '20px Arial';
+      ctx.fillStyle = 'white';
+      ctx.textAlign = 'center';
+      ctx.fillText('Too Thick!', width / 2, height / 2);
+    } else if (quality === 'too_thin') {
+      // Too thin smear: sparse, streaky
+      for (let i = 0; i < 5; i++) {
+        ctx.beginPath();
+        ctx.moveTo(width * 0.1 + i * 10, height * 0.9);
+        ctx.lineTo(width * 0.9 + i * 10, height * 0.1);
+        ctx.lineWidth = 3;
+        ctx.stroke();
+      }
+      ctx.font = '20px Arial';
+      ctx.fillStyle = 'black';
+      ctx.textAlign = 'center';
+      ctx.fillText('Too Thin!', width / 2, height / 2);
+    }
+  }, []);
+
+  const drawMicroscopeView = useCallback((quality) => {
+    const canvas = microscopeViewCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const width = canvas.width;
+    const height = canvas.height;
+
+    // Draw circular field of view
+    ctx.beginPath();
+    ctx.arc(width / 2, height / 2, width / 2 - 10, 0, Math.PI * 2);
+    ctx.fillStyle = 'black';
+    ctx.fill();
+    ctx.strokeStyle = 'white';
+    ctx.lineWidth = 5;
+    ctx.stroke();
+
+    // Draw cells based on smear quality
+    const drawCell = (x, y, radius, color) => {
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      // Nucleus
+      ctx.beginPath();
+      ctx.arc(x, y, radius * 0.3, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(200,0,0,0.8)';
+      ctx.fill();
+    };
+
+    if (quality === 'good') {
+      ctx.filter = 'none'; // Clear any blur/filter
+      for (let i = 0; i < 30; i++) {
+        const x = Math.random() * width * 0.8 + width * 0.1;
+        const y = Math.random() * height * 0.8 + height * 0.1;
+        const radius = Math.random() * 5 + 8; // Varied cell sizes
+        drawCell(x, y, radius, 'rgba(255, 100, 100, 0.8)'); // Red blood cells
+      }
+      ctx.font = '24px Inter';
+      ctx.fillStyle = 'white';
+      ctx.textAlign = 'center';
+      ctx.fillText('Good Smear!', width / 2, height - 30);
+    } else if (quality === 'too_thick') {
+      ctx.filter = 'blur(3px)';
+      for (let i = 0; i < 100; i++) { // Many overlapping cells
+        const x = Math.random() * width * 0.8 + width * 0.1;
+        const y = Math.random() * height * 0.8 + height * 0.1;
+        const radius = Math.random() * 8 + 10;
+        drawCell(x, y, radius, 'rgba(255, 50, 50, 0.5)');
+      }
+      ctx.font = '24px Inter';
+      ctx.fillStyle = 'white';
+      ctx.textAlign = 'center';
+      ctx.fillText('Too Thick Smear!', width / 2, height - 30);
+    } else if (quality === 'too_thin') {
+      ctx.filter = 'blur(1px)';
+      for (let i = 0; i < 5; i++) { // Few cells
+        const x = Math.random() * width * 0.8 + width * 0.1;
+        const y = Math.random() * height * 0.8 + height * 0.1;
+        const radius = Math.random() * 3 + 5;
+        drawCell(x, y, radius, 'rgba(255, 150, 150, 0.8)');
+      }
+      ctx.font = '24px Inter';
+      ctx.fillStyle = 'white';
+      ctx.textAlign = 'center';
+      ctx.fillText('Too Thin Smear!', width / 2, height - 30);
+    } else {
+      ctx.font = '24px Inter';
+      ctx.fillStyle = 'white';
+      ctx.textAlign = 'center';
+      ctx.fillText('No Smear Prepared Yet', width / 2, height / 2);
+    }
+  }, []);
+
   useEffect(() => {
-    const { renderer, camera, scene, controls, raycaster, objects } = threeRefs.current;
-    if (!renderer || !camera) return;
+    if (showMicroscopeView) {
+      drawMicroscopeView(smearQuality);
+    }
+  }, [showMicroscopeView, smearQuality, drawMicroscopeView]);
 
-    let draggingObj = null;
 
-    function getPointerCoords(e) {
-      let rect = renderer.domElement.getBoundingClientRect();
-      let x, y;
-      if (e.touches) {
-        x = ((e.touches[0].clientX - rect.left) / rect.width) * 2 - 1;
-        y = -((e.touches[0].clientY - rect.top) / rect.height) * 2 + 1;
-      } else {
-        x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-        y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-      }
-      return [x, y];
+  // --- Drag and Drop Logic ---
+  const handleDragStart = useCallback((toolId) => (e) => {
+    // Clear previous feedback immediately
+    setFeedbackMessage('');
+    setIsCorrectAction(null);
+
+    console.log(`Drag Start: toolId=${toolId}, currentStep=${currentStep}, activeTool=${activeTool}`);
+    // Only allow drag if it's the correct tool for the current step's action
+    const currentProcedure = labProcedureSteps[currentStep];
+    if (currentProcedure?.tool === toolId && currentProcedure?.action === 'use_tool_on_target') {
+        setActiveTool(toolId);
+        playClickSound();
+        e.dataTransfer.setData("toolId", toolId); // For actual drag-and-drop API
+    } else {
+        e.preventDefault(); // Prevent dragging if it's not the correct tool/step
+        setFeedbackMessage(`Please pick up the correct tool for this step.`);
+        setIsCorrectAction(false);
+        playErrorSound();
+        setTimeout(() => { setFeedbackMessage(''); setIsCorrectAction(null); }, 3000);
+    }
+  }, [playClickSound, currentStep, activeTool, labProcedureSteps, playErrorSound]);
+
+  const handleDragOver = useCallback((e) => {
+    e.preventDefault(); // Necessary to allow dropping
+  }, []);
+
+  const handleDrop = useCallback((targetId) => (e) => {
+    // Clear previous feedback immediately
+    setFeedbackMessage('');
+    setIsCorrectAction(null);
+
+    e.preventDefault();
+    const toolId = activeTool; // Get the active tool from state, not e.dataTransfer
+    console.log(`handleDrop: toolId=${toolId}, targetId=${targetId}, currentStep=${currentStep}, bloodDropVisible=${bloodDropVisible}, slideHasBlood=${slideHasBlood}`);
+
+    if (!toolId) {
+      console.log('No active tool to drop.');
+      setFeedbackMessage('Please pick up a tool first.');
+      setIsCorrectAction(false);
+      playErrorSound();
+      setTimeout(() => { setFeedbackMessage(''); setIsCorrectAction(null); }, 3000);
+      return;
     }
 
-    function onPointerDown(e) {
-      e.preventDefault();
-      if (simState.dragging) return;
+    const currentProcedure = labProcedureSteps[currentStep];
+    let newScore = score;
+    let message = '';
+    let isCorrect = false;
+    let proceedToNextStep = false;
 
-      let [mx, my] = getPointerCoords(e);
-      threeRefs.current.mouse.set(mx, my);
-
-      raycaster.setFromCamera(threeRefs.current.mouse, camera);
-
-      const intersectList = [objects["cylinder"], objects["pipette"]];
-      let intersects = raycaster.intersectObjects(
-        intersectList.map((obj) => obj),
-        true
-      );
-      if (intersects.length > 0) {
-        let pickedObj =
-          intersects[0].object.parent.type === "Group"
-            ? intersects[0].object.parent
-            : intersects[0].object;
-
-        if (
-          (pickedObj.name === "cylinder" &&
-            (currentStep === 2 || currentStep === 3)) ||
-          (pickedObj.name === "pipette" && currentStep === 2)
-        ) {
-          draggingObj = pickedObj.name;
-          setSimState((s) => ({ ...s, dragging: draggingObj }));
-          playSound("click");
+    // Validate drop based on current step, active tool, and target
+    if (currentProcedure.action === 'use_tool_on_target' && currentProcedure.tool === toolId && currentProcedure.target === targetId) {
+        switch (currentProcedure.id) {
+            case 'clean_finger':
+                message = 'Finger cleaned successfully!';
+                playSwabSound();
+                isCorrect = true;
+                newScore += 10;
+                proceedToNextStep = true;
+                break;
+            case 'apply_lancet':
+                message = 'Finger pricked! A blood drop appeared.';
+                playDropSound();
+                setBloodDropVisible(true);
+                isCorrect = true;
+                newScore += 20;
+                proceedToNextStep = true;
+                break;
+            case 'wipe_blood':
+                if (bloodDropVisible) { // Ensure there's a blood drop to wipe
+                    message = 'First blood drop wiped away. Good!';
+                    playSwabSound();
+                    setBloodDropVisible(false); // Hide the blood drop (temporarily)
+                    isCorrect = true;
+                    newScore += 10;
+                    proceedToNextStep = true;
+                } else {
+                    message = 'There is no blood drop to wipe yet.';
+                    isCorrect = false;
+                }
+                break;
+            case 'collect_blood_on_slide':
+                if (bloodDropVisible) { // Ensure there's a blood drop to collect
+                    message = 'Blood collected on the slide!';
+                    playDropSound();
+                    setBloodDropVisible(false); // Blood is now on the slide, not finger
+                    setSlideHasBlood(true); // Mark slide as having blood
+                    isCorrect = true;
+                    newScore += 20;
+                    proceedToNextStep = true;
+                } else {
+                    message = 'There is no blood drop to collect on the slide yet.';
+                    isCorrect = false;
+                }
+                break;
+            default:
+                message = 'Invalid action for this specific step.';
+                isCorrect = false;
+                break;
         }
-      }
-      threeRefs.current.pointerDown = true;
+    } else {
+        message = `Incorrect action or target for this step.`;
+        isCorrect = false;
     }
 
-    function onPointerMove(e) {
-      if (!simState.dragging) return;
-      e.preventDefault();
-      let [mx, my] = getPointerCoords(e);
-      threeRefs.current.mouse.set(mx, my);
+    setActiveTool(null); // Reset active tool after drop
+    setScore(newScore);
+    setFeedbackMessage(message);
+    setIsCorrectAction(isCorrect);
+    if (!isCorrect) playErrorSound();
 
-      raycaster.setFromCamera(threeRefs.current.mouse, camera);
-      let planeY = 0.98;
+    if (proceedToNextStep) {
+      setTimeout(() => {
+        setCurrentStep(prev => {
+            console.log(`Transitioning step from ${prev} to ${prev + 1}`);
+            return prev + 1;
+        });
+        setFeedbackMessage('');
+        setIsCorrectAction(null);
+      }, 1500);
+    } else {
+      setTimeout(() => {
+        setFeedbackMessage('');
+        setIsCorrectAction(null);
+      }, 3000);
+    }
+  }, [currentStep, score, activeTool, bloodDropVisible, slideHasBlood, playClickSound, playSuccessSound, playErrorSound, playDropSound, playSwabSound]);
 
-      let vector = new THREE.Vector3();
-      raycaster.ray.intersectPlane(
-        new THREE.Plane(new THREE.Vector3(0, 1, 0), -planeY),
-        vector
-      );
+  // --- Smear Creation Logic (now a click-based action) ---
+  const handleCreateSmear = useCallback(() => {
+    // Clear previous feedback immediately
+    setFeedbackMessage('');
+    setIsCorrectAction(null);
 
-      let obj = objects[simState.dragging];
-      if (obj) {
-        obj.position.x = vector.x;
-        obj.position.z = vector.z;
-        obj.position.y = planeY;
+    console.log(`handleCreateSmear: activeTool=${activeTool}, slideHasBlood=${slideHasBlood}, currentStep=${currentStep}`);
+    const currentProcedure = labProcedureSteps[currentStep];
+
+    // Only allow smear creation if spreader slide is active, blood is on slide, and it's the correct step
+    if (activeTool === 'spreader_slide' && slideHasBlood && currentProcedure?.id === 'perform_smear') {
+      const quality = 'good'; // For now, always create a "good" smear to ensure progression
+      const message = 'Excellent! Good quality blood smear created.';
+      const isCorrect = true;
+      const newScore = score + 30; // Award points for correct action
+
+      setSmearQuality(quality);
+      drawSmear(quality); // Draw the smear result on canvas
+      setScore(newScore);
+      setFeedbackMessage(message);
+      setIsCorrectAction(isCorrect);
+      setActiveTool(null); // Release spreader slide
+
+      playSuccessSound();
+
+      setTimeout(() => {
+        setCurrentStep(prev => {
+            console.log(`Transitioning step from ${prev} to ${prev + 1}`);
+            return prev + 1;
+        });
+        setFeedbackMessage('');
+        setIsCorrectAction(null);
+      }, 1500);
+    } else {
+      // Provide specific feedback if conditions aren't met
+      if (currentProcedure?.id !== 'perform_smear') {
+          setFeedbackMessage('It\'s not time to create the smear yet. Follow the steps.');
+      } else if (activeTool !== 'spreader_slide') {
+          setFeedbackMessage('First, pick up the Spreader Slide.');
+      } else if (!slideHasBlood) {
+          setFeedbackMessage('You need to collect blood on the slide first.');
       }
+      setIsCorrectAction(false);
+      playErrorSound();
+      setTimeout(() => { setFeedbackMessage(''); setIsCorrectAction(null); }, 3000);
+    }
+  }, [activeTool, slideHasBlood, currentStep, score, drawSmear, playSuccessSound, playErrorSound, labProcedureSteps]);
+
+
+  // --- General Action Handler (for clicks on tools/buttons) ---
+  const handleAction = useCallback((objectId) => {
+    // Clear previous feedback immediately
+    setFeedbackMessage('');
+    setIsCorrectAction(null);
+
+    const currentProcedure = labProcedureSteps[currentStep];
+    let newScore = score;
+    let message = '';
+    let isCorrect = false;
+    let proceedToNextStep = false;
+
+    switch (currentProcedure.action) {
+      case 'pick_up_tool':
+        if (objectId === currentProcedure.target) {
+          setActiveTool(objectId);
+          message = `${objectId.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())} picked up.`;
+          isCorrect = true;
+          proceedToNextStep = true;
+          playSuccessSound();
+        } else {
+          message = `Incorrect. Please pick up the ${currentProcedure.target.replace(/_/g, ' ')}.`;
+          isCorrect = false;
+        }
+        break;
+      case 'next_step_button':
+        if (objectId === 'next_button') {
+          message = 'Proceeding to the next step.';
+          isCorrect = true;
+          proceedToNextStep = true;
+          playSuccessSound();
+        } else {
+          message = 'Please click the "Next" button.';
+          isCorrect = false;
+        }
+        break;
+      case 'auto_advance_blood_drop': // Handle the new auto-advance step
+        if (currentProcedure.id === 'wait_for_second_drop') {
+            setBloodDropVisible(true); // Make the second drop appear
+            message = 'Second blood drop formed. Now collect it!';
+            isCorrect = true;
+            proceedToNextStep = true;
+            playDropSound(); // Play a sound for the new drop
+        }
+        break;
+      case 'click_create_smear': // Handle the new click-to-create-smear action
+        if (objectId === 'create_smear_button') {
+            handleCreateSmear(); // Delegate to the smear creation function
+            return; // handleCreateSmear will manage feedback and step progression
+        }
+        break;
+      case 'view_microscope':
+        if (objectId === 'microscope_icon') {
+          setShowMicroscopeView(true);
+          message = 'Observing smear under microscope.';
+          isCorrect = true; // This action itself is correct
+          // DO NOT set proceedToNextStep = true here, as closing the view advances the step
+          playSuccessSound();
+        } else {
+          message = 'Incorrect. Click the microscope icon to view the smear.';
+          isCorrect = false;
+        }
+        break;
+      case 'mcq_handled_internally': // This case now signifies MCQ completion handled by MCQChallenge
+        // The MCQChallenge component will directly call setScore and setCurrentStep
+        // This 'action' is just a placeholder to prevent default feedback handling here.
+        return;
+      default:
+        message = 'Invalid action for this step.';
+        isCorrect = false;
+        break;
     }
 
-    function onPointerUp(e) {
-      if (!simState.dragging) return;
-      e.preventDefault();
+    // Only set feedback and advance if not handled by a delegated function (like handleCreateSmear or MCQ)
+    // And only if proceedToNextStep is explicitly true (for non-microscope view actions)
+    if (proceedToNextStep) {
+        setTimeout(() => {
+          setCurrentStep(prev => {
+              console.log(`Transitioning step from ${prev} to ${prev + 1}`);
+              return prev + 1;
+          });
+          setFeedbackMessage('');
+          setIsCorrectAction(null);
+        }, 1500);
+    } else if (currentProcedure.action !== 'click_create_smear' && currentProcedure.action !== 'mcq_handled_internally' && currentProcedure.action !== 'view_microscope') {
+        // For incorrect actions or actions that don't immediately advance, just show feedback
+        setScore(newScore); // Update score even for incorrect actions if points are deducted
+        setFeedbackMessage(message);
+        setIsCorrectAction(isCorrect);
+        if (!isCorrect && currentProcedure.action !== 'use_tool_on_target') playErrorSound(); // Avoid double error sound
+        setTimeout(() => {
+            setFeedbackMessage('');
+            setIsCorrectAction(null);
+        }, 3000);
+    }
+    // For 'view_microscope' action, feedback is set, but no auto-advance here.
+    // For 'click_create_smear' and 'mcq_handled_internally', their respective handlers manage feedback and advance.
 
-      let obj = objects[simState.dragging];
-      if (!obj) {
-        setSimState((s) => ({ ...s, dragging: null }));
+  }, [currentStep, score, activeTool, playSuccessSound, playErrorSound, playDropSound, handleCreateSmear]);
+
+  // Effect to handle auto-advancing steps
+  useEffect(() => {
+    const currentProcedure = labProcedureSteps[currentStep];
+    if (currentProcedure && currentProcedure.action === 'auto_advance_blood_drop') {
+      // Simulate a brief delay before the second drop appears and auto-advances
+      const timer = setTimeout(() => {
+        handleAction(currentProcedure.target); // Trigger the action for this step
+      }, 2000); // 2-second delay for the drop to "form"
+      return () => clearTimeout(timer);
+    }
+  }, [currentStep, handleAction, labProcedureSteps]);
+
+
+  // --- UI Elements ---
+  const ToolButton = ({ id, label, icon, onClick, isDraggable = false }) => {
+    const currentProcedure = labProcedureSteps[currentStep];
+    const isPickUpTarget = currentProcedure?.action === 'pick_up_tool' && currentProcedure?.target === id;
+    const isToolForDragTarget = currentProcedure?.action === 'use_tool_on_target' && currentProcedure?.tool === id;
+
+    // A tool is clickable if it's the target to be picked up
+    const isClickable = isPickUpTarget;
+
+    // A tool is draggable from the panel if it's meant to be dragged to a target area
+    const canBeDraggedFromPanel = isDraggable && isToolForDragTarget;
+
+    // Visual active state: if it's the currently held tool
+    const isActive = activeTool === id;
+
+    // Visual highlighting: if it's the tool to be picked up OR the tool to be dragged from panel
+    const isHighlighted = isPickUpTarget || canBeDraggedFromPanel;
+
+    return (
+      <button
+        id={id}
+        className={`flex flex-col items-center justify-center p-3 md:p-4 rounded-xl shadow-md transition-all duration-200 ease-in-out
+          ${isActive ? 'bg-indigo-400 text-white transform scale-105' : 'bg-white text-gray-800 hover:bg-gray-100'}
+          ${isHighlighted && !isActive ? 'border-2 border-dashed border-purple-500 animate-pulse' : 'border-2 border-transparent'}
+          ${activeTool === id ? 'ring-4 ring-blue-500 ring-opacity-75' : ''}
+          ${(isClickable || canBeDraggedFromPanel) ? 'cursor-pointer' : 'opacity-70 cursor-not-allowed'}
+        `}
+        onClick={isClickable ? () => onClick(id) : null}
+        draggable={canBeDraggedFromPanel} // Only draggable if relevant for current step and meant for dragging from panel
+        onDragStart={canBeDraggedFromPanel ? handleDragStart(id) : null}
+      >
+        <span className="text-2xl md:text-4xl mb-1">{icon}</span>
+        <span className="text-xs md:text-sm font-semibold text-center">{label}</span>
+      </button>
+    );
+  };
+
+  const TargetArea = ({ id, label, icon, onDrop, children }) => {
+    const currentProcedure = labProcedureSteps[currentStep];
+    const isTarget = currentProcedure?.target === id || (Array.isArray(currentProcedure?.target) && currentProcedure?.target.includes(id));
+    const isCurrentlyActiveTarget = isTarget && activeTool === currentProcedure?.tool; // Highlight only if the correct tool is active
+
+    return (
+      <div
+        id={id}
+        className={`relative flex flex-col items-center justify-center p-4 md:p-6 rounded-xl border-2 transition-all duration-200 ease-in-out w-full max-w-sm
+          ${isCurrentlyActiveTarget ? 'border-purple-600 bg-purple-50 animate-pulse' : 'border-gray-300 bg-gray-50'}
+          ${activeTool && isTarget ? 'cursor-copy' : 'cursor-default'}
+        `}
+        onDragOver={handleDragOver}
+        onDrop={isCurrentlyActiveTarget ? onDrop : null} // Only allow drop if it's the current target with the correct active tool
+      >
+        <span className="text-3xl md:text-5xl mb-2">{icon}</span>
+        <span className="text-sm md:text-base font-semibold text-gray-700 text-center">{label}</span>
+        {children}
+      </div>
+    );
+  };
+
+  // --- Reset Simulation ---
+  const resetSimulation = useCallback(() => {
+    setCurrentStep(0);
+    setScore(0);
+    setFeedbackMessage('');
+    setIsCorrectAction(null);
+    setActiveTool(null);
+    setBloodDropVisible(false);
+    setSlideHasBlood(false);
+    setSmearQuality(null);
+    setShowMicroscopeView(false);
+
+    // Clear smear canvas
+    const smearCtx = smearCanvasRef.current?.getContext('2d');
+    if (smearCtx) smearCtx.clearRect(0, 0, smearCanvasRef.current.width, smearCanvasRef.current.height);
+    // Clear microscope view canvas
+    const microCtx = microscopeViewCanvasRef.current?.getContext('2d');
+    if (microCtx) microCtx.clearRect(0, 0, microscopeViewCanvasRef.current.width, microscopeViewCanvasRef.current.height);
+
+    playClickSound();
+  }, [playClickSound]);
+
+
+  // --- Video Player Component ---
+  const VideoPlayer = ({ videoId, onVideoComplete }) => {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-screen bg-gradient-to-br from-blue-100 to-indigo-200 p-6 font-inter">
+        <div className="bg-white p-8 rounded-xl shadow-2xl max-w-4xl w-full text-center border-4 border-indigo-500 animate-fade-in">
+          <h2 className="text-3xl md:text-4xl font-extrabold text-indigo-700 mb-6">
+            Real-Life Demonstration
+          </h2>
+          <p className="text-lg text-gray-700 mb-6">
+            Watch this video to see the blood smear preparation process in action.
+          </p>
+          <div className="relative w-full h-0 pb-[56.25%] mb-8 rounded-lg overflow-hidden shadow-lg">
+            <iframe
+              className="absolute top-0 left-0 w-full h-full"
+              src={`https://www.youtube.com/embed/${videoId}?rel=0`}
+              title="YouTube video player"
+              frameBorder="0"
+              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+              referrerPolicy="strict-origin-when-cross-origin"
+              allowFullScreen
+            ></iframe>
+          </div>
+          <button
+            onClick={onVideoComplete}
+            className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-8 rounded-full shadow-lg transition-transform transform hover:scale-105 focus:outline-none focus:ring-4 focus:ring-indigo-300 text-lg md:text-xl"
+          >
+            Next
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  // --- MCQ Challenge Component ---
+  const MCQChallenge = ({ question, options, correctAnswer, onQuizComplete }) => {
+    const [selectedOption, setSelectedOption] = useState(null);
+    const [localFeedback, setLocalFeedback] = useState('');
+    const [localIsCorrect, setLocalIsCorrect] = useState(null);
+
+    const handleSubmit = () => {
+      if (selectedOption === null) {
+        setLocalFeedback('Please select an answer.');
+        setLocalIsCorrect(null);
         return;
       }
 
-      if (simState.dragging === "cylinder") {
-        let distToSink = obj.position.distanceTo(objects["sink"].position);
-        if (distToSink < 0.55 && !simState.cylinderFilled) {
-          setSimState((s) => ({
-            ...s,
-            cylinderFilled: true,
-          }));
-          setFeedback("Cylinder filled with 50ml of water!");
-          playSound("pour");
-        }
-        let benchPos = objects["bench_main"].position;
-        let benchDist = Math.abs(obj.position.x - benchPos.x) < 1 && Math.abs(obj.position.z - benchPos.z) < 0.7;
-        if (simState.cylinderFilled && benchDist) {
-          setSimState((s) => ({
-            ...s,
-            cylinderAtBench: true,
-          }));
-          setFeedback("Cylinder placed on the bench.");
-          playSound("success");
-        }
-        let distToBalance = obj.position.distanceTo(objects["balance"].position);
-        if (simState.cylinderFilled && distToBalance < 0.38) {
-          setSimState((s) => ({
-            ...s,
-            cylinderWeighed: true,
-          }));
-          setFeedback("Cylinder weighed! Display: 53.4g");
-          playSound("beep");
-        }
-        let distToBin = obj.position.distanceTo(objects["wastebin"].position);
-        if (distToBin < 0.33 && simState.cylinderFilled) {
-          setSimState((s) => ({
-            ...s,
-            wasteDisposed: true,
-            cylinderFilled: false,
-            cylinderAtBench: false,
-            cylinderWeighed: false,
-          }));
-          setFeedback("Waste properly disposed!");
-          playSound("success");
-          obj.position.set(-1.1, 0.98, 0.32);
-        }
-      }
-      if (simState.dragging === "pipette") {
-        setFeedback("Pipette interaction is not required in this step.");
+      const isCorrectAnswer = (selectedOption === correctAnswer);
+
+      if (isCorrectAnswer) {
+        setLocalFeedback('Correct! Well done.');
+        setLocalIsCorrect(true);
+      } else {
+        setLocalFeedback(`Incorrect. The correct answer was: ${correctAnswer}`);
+        setLocalIsCorrect(false);
       }
 
-      setSimState((s) => ({ ...s, dragging: null }));
-      threeRefs.current.pointerDown = false;
-    }
-
-    function onBalanceClick(e) {
-      if (!threeRefs.current.renderer) return;
-      let rect = threeRefs.current.renderer.domElement.getBoundingClientRect();
-      let mx = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-      let my = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-      threeRefs.current.mouse.set(mx, my);
-
-      threeRefs.current.raycaster.setFromCamera(
-        threeRefs.current.mouse,
-        threeRefs.current.camera
-      );
-      let intersects = threeRefs.current.raycaster.intersectObject(
-        threeRefs.current.objects["balance"],
-        true
-      );
-      if (intersects.length > 0) {
-        if (currentStep === 1 && !simState.balanceCalibrated) {
-          setSimState((s) => ({ ...s, balanceCalibrated: true }));
-          setFeedback("Balance calibrated (zeroed)!");
-          playSound("beep");
-        } else if (simState.cylinderFilled && currentStep === 3) {
-          setSimState((s) => ({ ...s, cylinderWeighed: true }));
-          setFeedback("Cylinder weighed! Display: 53.4g");
-          playSound("beep");
-        }
-      }
-    }
-
-    const canvas = renderer.domElement;
-    canvas.addEventListener("mousedown", onPointerDown);
-    canvas.addEventListener("mousemove", onPointerMove);
-    canvas.addEventListener("mouseup", onPointerUp);
-    canvas.addEventListener("touchstart", onPointerDown, { passive: false });
-    canvas.addEventListener("touchmove", onPointerMove, { passive: false });
-    canvas.addEventListener("touchend", onPointerUp, { passive: false });
-    canvas.addEventListener("click", onBalanceClick);
-
-    return () => {
-      canvas.removeEventListener("mousedown", onPointerDown);
-      canvas.removeEventListener("mousemove", onPointerMove);
-      canvas.removeEventListener("mouseup", onPointerUp);
-      canvas.removeEventListener("touchstart", onPointerDown);
-      canvas.removeEventListener("touchmove", onPointerMove);
-      canvas.removeEventListener("touchend", onPointerUp);
-      canvas.removeEventListener("click", onBalanceClick);
-    };
-    // eslint-disable-next-line
-  }, [simState, currentStep]);
-
-  // ========== React Effect: Step Progression & Validation ==========
-  useEffect(() => {
-    let curStep = PROCEDURE[currentStep];
-    if (curStep.validate(simState)) {
+      // After a short delay, signal completion to the parent component
       setTimeout(() => {
-        if (currentStep < PROCEDURE.length - 1) {
-          setCurrentStep((n) => n + 1);
-          setFeedback("");
-        } else {
-          setFeedback("Congratulations! You have completed all safety & handling steps.");
-          setShowModal(true);
-        }
-      }, 850);
-    }
-    // eslint-disable-next-line
-  }, [simState]);
+        onQuizComplete(isCorrectAnswer); // Pass correctness back to parent
+      }, 2000); // Show feedback for 2 seconds
+    };
 
-  // ========== Handlers for Lab Coat & Goggles ==========
-  const handleWearLabCoat = () => {
-    if (!simState.wearingLabCoat) {
-      setSimState((s) => ({ ...s, wearingLabCoat: true }));
-      setFeedback("Lab coat worn.");
-      playSound("click");
-    }
+    return (
+      <div className="flex flex-col items-center justify-center min-h-screen bg-gradient-to-br from-green-100 to-teal-200 p-6 font-inter">
+        <div className="bg-white p-8 rounded-xl shadow-2xl max-w-3xl w-full text-center border-4 border-teal-500 animate-fade-in">
+          <h2 className="text-3xl md:text-4xl font-extrabold text-teal-700 mb-6">
+            Knowledge Check!
+          </h2>
+          <p className="text-lg text-gray-700 mb-6 leading-relaxed">
+            {question}
+          </p>
+          <div className="flex flex-col space-y-4 mb-8">
+            {options.map((option, index) => (
+              <button
+                key={index}
+                onClick={() => setSelectedOption(option)}
+                className={`w-full p-4 rounded-lg border-2 text-left font-semibold transition-all duration-200
+                  ${selectedOption === option ? 'bg-teal-400 text-white border-teal-600 shadow-md' : 'bg-white text-gray-800 border-gray-300 hover:bg-teal-50 hover:border-teal-300'}
+                  ${localIsCorrect === true && selectedOption === option ? 'bg-green-500 border-green-700 text-white' : ''}
+                  ${localIsCorrect === false && selectedOption === option ? 'bg-red-500 border-red-700 text-white' : ''}
+                `}
+                disabled={localIsCorrect !== null} // Disable buttons after answer
+              >
+                {option}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={handleSubmit}
+            className="bg-teal-600 hover:bg-teal-700 text-white font-bold py-3 px-8 rounded-full shadow-lg transition-transform transform hover:scale-105 focus:outline-none focus:ring-4 focus:ring-teal-300 text-lg md:text-xl disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={localIsCorrect !== null} // Disable submit after answer
+          >
+            Submit Answer
+          </button>
+          {localFeedback && (
+            <div className={`mt-6 p-4 rounded-lg text-white font-bold text-xl ${localIsCorrect ? 'bg-green-500' : 'bg-red-500'}`}>
+              {localFeedback}
+            </div>
+          )}
+        </div>
+      </div>
+    );
   };
-  const handleWearGoggles = () => {
-    if (!simState.wearingGoggles) {
-      setSimState((s) => ({ ...s, wearingGoggles: true }));
-      setFeedback("Safety goggles worn.");
-      playSound("click");
-    }
-  };
 
-  // ========== Render UI ==========
+  // Log current state for debugging
+  console.log('--- App Render ---');
+  console.log('Current Step:', currentStep, '(', labProcedureSteps[currentStep]?.id, ')');
+  console.log('Active Tool:', activeTool);
+  console.log('Slide Has Blood:', slideHasBlood);
+  console.log('Feedback Message:', feedbackMessage);
+  console.log('Is Correct Action:', isCorrectAction);
+  console.log('------------------');
 
-  const stepPct = ((currentStep + 1) / PROCEDURE.length) * 100;
 
   return (
-    <div className="relative w-screen h-screen flex flex-col overflow-hidden bg-blue-50">
-      {/* --- Top Progress Bar and Title --- */}
-      <div className="absolute z-30 w-full top-0 left-0 px-2 pt-3 flex flex-col md:flex-row items-center">
-        <div className="w-full md:w-1/2 max-w-xl mx-auto">
-          <div className="text-lg font-bold tracking-wide text-blue-900">
-            Virtual Medical Laboratory Simulation
-          </div>
-          <div className="w-full h-3 bg-blue-200 rounded-lg my-1">
-            <div
-              className="h-3 bg-blue-600 rounded-lg transition-all"
-              style={{ width: `${stepPct}%` }}
-            />
-          </div>
-          <div className="text-sm text-blue-900">
-            Step {currentStep + 1} of {PROCEDURE.length}:{" "}
-            <span className="font-medium">{PROCEDURE[currentStep].title}</span>
-          </div>
-        </div>
-      </div>
-      {/* --- Main 3D Canvas --- */}
-      <div
-        ref={mountRef}
-        className="absolute top-0 left-0 w-full h-full bg-blue-50"
-        style={{ touchAction: "none", zIndex: 10 }}
-      ></div>
+    <div className="relative w-full min-h-screen bg-gradient-to-br from-sky-100 to-indigo-200 flex flex-col items-center justify-start font-inter overflow-hidden pb-8">
+      {/* Header */}
+      <header className="w-full shadow-lg bg-indigo-800 py-4 md:py-6 mb-4 md:mb-8">
+        <h1 className="text-2xl md:text-4xl text-white font-extrabold text-center tracking-wide">
+          Kings Polytechnic Online
+        </h1>
+        <p className="text-center text-indigo-200 font-medium mt-1 md:mt-2 text-sm md:text-base">
+          Virtual Medical Lab Practical
+        </p>
+      </header>
 
-      {/* --- UI Overlay Panel: Step Instructions & Interactives --- */}
-      <div className="absolute top-20 left-0 md:left-8 w-full md:w-[24rem] p-4 bg-white bg-opacity-80 rounded-2xl shadow-xl z-40">
-        <div className="flex gap-2 items-center mb-2">
-          {/* Lab Coat */}
-          <button
-            onClick={handleWearLabCoat}
-            className={`rounded-full border-2 ${
-              simState.wearingLabCoat
-                ? "border-green-500 bg-green-100"
-                : "border-blue-500"
-            } px-2 py-1 font-medium text-blue-900 text-xs transition-colors`}
-            disabled={simState.wearingLabCoat}
-          >
-            {simState.wearingLabCoat ? "Lab Coat Worn" : "Wear Lab Coat"}
-          </button>
-          {/* Goggles */}
-          <button
-            onClick={handleWearGoggles}
-            className={`rounded-full border-2 ${
-              simState.wearingGoggles
-                ? "border-green-500 bg-green-100"
-                : "border-blue-500"
-            } px-2 py-1 font-medium text-blue-900 text-xs transition-colors`}
-            disabled={simState.wearingGoggles}
-          >
-            {simState.wearingGoggles ? "Goggles Worn" : "Wear Goggles"}
-          </button>
-        </div>
-        <div className="mb-2 text-blue-900 font-semibold text-base">
-          {PROCEDURE[currentStep].instruction}
-        </div>
-        {/* Feedback */}
-        {feedback && (
-          <div
-            className={`mb-2 px-3 py-2 rounded-xl font-medium ${
-              feedback.includes("Incorrect")
-                ? "bg-red-100 text-red-600"
-                : "bg-green-100 text-green-800"
-            } transition-all`}
-          >
-            {feedback}
+      {/* Main Content Area */}
+      <main className="flex flex-col items-center w-full max-w-6xl px-4">
+
+        {/* Top Instruction & Score Bar */}
+        {currentStep < labProcedureSteps.length - 1 && currentStep !== 0 && labProcedureSteps[currentStep]?.id !== 'mcq_challenge' && ( // Hide for intro, final completion, and MCQ
+          <div className="bg-white bg-opacity-95 rounded-xl shadow-xl p-4 md:p-6 w-full mb-6 border-b-4 border-purple-500 animate-fade-in">
+            <h2 className="text-lg md:text-xl font-bold text-gray-800 mb-2">Current Task:</h2>
+            <p className="text-base md:text-lg text-gray-700">{labProcedureSteps[currentStep]?.instruction}</p>
+            <div className="flex justify-between items-center mt-4 pt-4 border-t border-gray-200">
+              <span className="text-xl md:text-2xl font-semibold text-purple-700">Score: {score}</span>
+              <span className="text-md md:text-lg font-semibold text-gray-600">Step {currentStep} / {labProcedureSteps.length - 1}</span>
+            </div>
           </div>
         )}
-        {/* Error if trying to proceed without completing step */}
-        {!PROCEDURE[currentStep].validate(simState) && (
-          <div className="text-xs text-red-500">
-            {PROCEDURE[currentStep].error}
+
+
+        {/* Feedback Message */}
+        {feedbackMessage && (
+          <div className={`fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 p-4 md:p-6 rounded-lg shadow-2xl text-white text-center font-bold text-xl md:text-2xl z-50 animate-fade-in transition-all duration-300 ease-in-out
+            ${isCorrectAction === true ? 'bg-green-600' : 'bg-red-600'}`}>
+            {feedbackMessage}
           </div>
         )}
-        {/* Progress/Status */}
-        <div className="mt-3 flex gap-2 text-xs text-blue-800 flex-wrap">
-          <div>
-            <span
-              className={`w-2 h-2 rounded-full inline-block mr-1 ${
-                simState.wearingLabCoat ? "bg-green-500" : "bg-blue-300"
-              }`}
-            ></span>
-            Lab Coat
-          </div>
-          <div>
-            <span
-              className={`w-2 h-2 rounded-full inline-block mr-1 ${
-                simState.wearingGoggles ? "bg-green-500" : "bg-blue-300"
-              }`}
-            ></span>
-            Goggles
-          </div>
-          <div>
-            <span
-              className={`w-2 h-2 rounded-full inline-block mr-1 ${
-                simState.balanceCalibrated ? "bg-green-500" : "bg-blue-300"
-              }`}
-            ></span>
-            Balance Calibrated
-          </div>
-          <div>
-            <span
-              className={`w-2 h-2 rounded-full inline-block mr-1 ${
-                simState.cylinderFilled ? "bg-green-500" : "bg-blue-300"
-              }`}
-            ></span>
-            Cylinder Filled
-          </div>
-          <div>
-            <span
-              className={`w-2 h-2 rounded-full inline-block mr-1 ${
-                simState.cylinderWeighed ? "bg-green-500" : "bg-blue-300"
-              }`}
-            ></span>
-            Cylinder Weighed
-          </div>
-          <div>
-            <span
-              className={`w-2 h-2 rounded-full inline-block mr-1 ${
-                simState.wasteDisposed ? "bg-green-500" : "bg-blue-300"
-              }`}
-            ></span>
-            Waste Disposed
-          </div>
-        </div>
-      </div>
 
-      {/* --- Completion Modal --- */}
-      {showModal && (
-        <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black bg-opacity-40">
-          <div className="bg-white rounded-2xl shadow-2xl px-7 py-8 max-w-xs w-full flex flex-col items-center animate-fadein">
-            <div className="text-2xl font-bold text-green-700 mb-2">
-              Procedure Complete!
+        {/* Render different screens based on currentStep */}
+        {currentStep === 0 && (
+          <div className="absolute inset-0 flex items-center justify-center z-20 bg-black bg-opacity-70 pointer-events-auto">
+            <div className="bg-white p-8 md:p-12 rounded-xl shadow-2xl text-center border-4 border-purple-500 animate-scale-in transform transition-all duration-300 ease-in-out scale-95 md:scale-100">
+              <h1 className="text-3xl md:text-5xl font-extrabold text-purple-700 mb-4">Kings Polytechnic Online</h1>
+              <p className="text-base md:text-lg text-gray-700 mb-6">
+                Learn the step-by-step procedure for preparing a blood smear, from patient preparation to microscopic observation.
+              </p>
+              <button
+                onClick={() => { setCurrentStep(1); playClickSound(); }}
+                className="bg-purple-600 hover:bg-purple-700 text-white font-bold py-3 px-8 rounded-full shadow-lg transition-transform transform hover:scale-105 focus:outline-none focus:ring-4 focus:ring-purple-300 text-lg md:text-xl"
+              >
+                Start Simulation
+              </button>
             </div>
-            <div className="mb-2 text-gray-700">
-              You have successfully finished all safety & equipment handling steps.
-            </div>
-            <button
-              className="mt-4 px-6 py-2 rounded-lg bg-blue-700 text-white font-semibold shadow hover:bg-blue-800 transition"
-              onClick={() => setShowModal(false)}
-            >
-              Close
-            </button>
           </div>
-        </div>
-      )}
+        )}
 
-      {/* --- Responsive note (mobile users) --- */}
-      <div className="absolute right-3 bottom-3 z-40">
-        <div className="text-xs bg-white bg-opacity-80 rounded-lg px-3 py-1 shadow text-blue-900">
-          {window.innerWidth < 640
-            ? "Tip: Pinch & drag to explore the 3D lab. Tap objects to interact."
-            : "Tip: Use mouse to rotate/zoom. Drag objects for lab tasks."}
-        </div>
-      </div>
+        {/* Lab Workspace (visible for core simulation steps) */}
+        {currentStep > 0 && currentStep < labProcedureSteps.findIndex(step => step.id === 'video_demonstration') && !showMicroscopeView && (
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 w-full">
+            {/* Tools Column */}
+            <div className="md:col-span-1 bg-white rounded-xl shadow-lg p-4 md:p-6 flex flex-col items-center space-y-4 border-2 border-gray-200">
+              <h3 className="text-xl font-bold text-gray-800 mb-2">Tools</h3>
+              <ToolButton id="alcohol_swab" label="Alcohol Swab" icon="🩹" onClick={handleAction} isDraggable={true} />
+              <ToolButton id="lancet" label="Lancet" icon="💉" onClick={handleAction} isDraggable={true} />
+              <ToolButton id="clean_slide" label="Clean Slide" icon="🔬" onClick={handleAction} isDraggable={true} />
+              <ToolButton id="spreader_slide" label="Spreader Slide" icon="📏" onClick={handleAction} isDraggable={true} />
+            </div>
+
+            {/* Workspace Column */}
+            <div className="md:col-span-2 bg-white rounded-xl shadow-lg p-4 md:p-6 flex flex-col items-center justify-around space-y-6 border-2 border-gray-200">
+              <h3 className="text-xl font-bold text-gray-800 mb-2">Workspace</h3>
+
+              {/* Patient Finger Area */}
+              <TargetArea
+                id="finger"
+                label="Patient Finger"
+                icon="👆"
+                onDrop={handleDrop('finger')}
+                ref={fingerRef}
+              >
+                {/* Blood drop icon appears only when bloodDropVisible is true */}
+                {bloodDropVisible && (
+                  <span className="absolute text-3xl md:text-5xl top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-red-600 animate-pulse">🩸</span>
+                )}
+              </TargetArea>
+
+              {/* Blood Drop Target (always present in DOM, visibility controlled by state) */}
+              <TargetArea
+                id="blood_drop"
+                label="Blood Drop"
+                icon="💧"
+                onDrop={handleDrop('blood_drop')}
+              >
+                {bloodDropVisible && (
+                  <span className="absolute text-3xl md:text-5xl top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-red-600 animate-pulse">🩸</span>
+                )}
+              </TargetArea>
+
+              {/* Clean Slide & Smear Area */}
+              <TargetArea
+                id="clean_slide_area"
+                label="Glass Slide"
+                icon="⬜"
+                onDrop={handleDrop('clean_slide_area')} // For dropping the blood onto the slide
+                ref={slideRef}
+              >
+                {slideHasBlood && (
+                  <canvas
+                    ref={smearCanvasRef}
+                    width="200"
+                    height="100"
+                    className={`absolute rounded-md transition-opacity duration-500
+                      ${smearQuality ? 'border-2' : ''}
+                      ${smearQuality === 'good' ? 'border-green-500' : smearQuality ? 'border-red-500' : ''}
+                    `}
+                  ></canvas>
+                )}
+              </TargetArea>
+
+              {/* Create Smear Button (for perform_smear step) */}
+              {labProcedureSteps[currentStep]?.id === 'perform_smear' && activeTool === 'spreader_slide' && slideHasBlood && (
+                 <button
+                   onClick={() => handleAction('create_smear_button')}
+                   className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-8 rounded-full shadow-lg transition-transform transform hover:scale-105 focus:outline-none focus:ring-4 focus:ring-blue-300 text-lg md:text-xl pointer-events-auto mt-6"
+                 >
+                   Create Smear
+                 </button>
+              )}
+
+              {/* Next Step Button (for air_dry and procedure_complete) AND View Smear Button (for microscope_observation) */}
+              {(labProcedureSteps[currentStep]?.id === 'air_dry' || labProcedureSteps[currentStep]?.id === 'microscope_observation' || labProcedureSteps[currentStep]?.id === 'procedure_complete') && (
+                <button
+                  onClick={() => {
+                    if (labProcedureSteps[currentStep]?.id === 'microscope_observation') {
+                      handleAction('microscope_icon'); // Correctly trigger microscope view
+                    } else {
+                      handleAction('next_button'); // For 'air_dry' and 'procedure_complete'
+                    }
+                  }}
+                  className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-8 rounded-full shadow-lg transition-transform transform hover:scale-105 focus:outline-none focus:ring-4 focus:ring-blue-300 text-lg md:text-xl pointer-events-auto mt-6"
+                >
+                  {labProcedureSteps[currentStep]?.id === 'air_dry' ? 'Next Step' :
+                   labProcedureSteps[currentStep]?.id === 'microscope_observation' ? 'View Smear under Microscope' :
+                   'Continue'}
+                </button>
+              )}
+
+            </div>
+          </div>
+        )}
+
+        {/* Microscope Observation View */}
+        {showMicroscopeView && (
+          <div className="fixed inset-0 bg-black bg-opacity-80 flex items-center justify-center z-40 animate-fade-in">
+            <div className="bg-white rounded-xl shadow-2xl p-6 md:p-8 text-center border-4 border-indigo-500 flex flex-col items-center">
+              <h2 className="text-2xl md:text-3xl font-extrabold text-indigo-700 mb-4">Microscopic View</h2>
+              <canvas
+                ref={microscopeViewCanvasRef}
+                width="400"
+                height="400"
+                className="bg-black rounded-full border-4 border-gray-700 mb-6"
+              ></canvas>
+              {smearQuality && (
+                <p className={`text-xl md:text-2xl font-bold mb-4 ${smearQuality === 'good' ? 'text-green-700' : 'text-red-700'}`}>
+                  Smear Quality: {smearQuality.replace('_', ' ').toUpperCase()}
+                </p>
+              )}
+              <button
+                onClick={() => { setShowMicroscopeView(false); setCurrentStep(prev => {
+                    console.log(`Transitioning step from ${prev} to ${prev + 1}`);
+                    return prev + 1;
+                }); playClickSound(); }}
+                className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-8 rounded-full shadow-lg transition-transform transform hover:scale-105 focus:outline-none focus:ring-4 focus:ring-blue-300 text-lg md:text-xl"
+              >
+                Close View & Finish
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Video Demonstration Screen */}
+        {labProcedureSteps[currentStep]?.id === 'video_demonstration' && (
+          <VideoPlayer
+            videoId="KSs0SMfERuA" // YouTube video ID for "Blood Smear Preparation and Staining Practical Lab"
+            onVideoComplete={() => handleAction('next_button')} // Use handleAction to advance step
+          />
+        )}
+
+        {/* MCQ Challenge Screen */}
+        {labProcedureSteps[currentStep]?.id === 'mcq_challenge' && (
+          <MCQChallenge
+            question="Which of the following is the primary purpose of wiping away the first drop of blood during a finger prick for a blood smear?"
+            options={[
+              "To reduce pain for the patient.",
+              "To remove tissue fluid contamination.",
+              "To ensure the blood drop is larger.",
+              "To sterilize the finger further."
+            ]}
+            correctAnswer="To remove tissue fluid contamination."
+            onQuizComplete={(isAnswerCorrect) => {
+              // This callback is triggered by MCQChallenge when an answer is submitted
+              if (isAnswerCorrect) {
+                setScore(prev => prev + 50); // Award points for correct MCQ answer
+                setFeedbackMessage('Correct! Well done.');
+                setIsCorrectAction(true);
+              } else {
+                setFeedbackMessage('Incorrect. Try to review the video demonstration.');
+                setIsCorrectAction(false);
+              }
+              playClickSound(); // Play a click sound on answer submission
+
+              // Advance to the next step after showing feedback
+              setTimeout(() => {
+                setCurrentStep(prev => {
+                  console.log(`Transitioning step from ${prev} to ${prev + 1}`);
+                  return prev + 1;
+                });
+                setFeedbackMessage('');
+                setIsCorrectAction(null);
+              }, 2000); // Show feedback for 2 seconds before advancing
+            }}
+          />
+        )}
+
+
+        {/* Final Completion Message */}
+        {labProcedureSteps[currentStep]?.id === 'final_completion' && (
+          <div className="absolute inset-0 flex items-center justify-center z-20 bg-black bg-opacity-70 pointer-events-auto">
+            <div className="bg-white p-8 md:p-12 rounded-xl shadow-2xl text-center border-4 border-green-500 animate-scale-in transform transition-all duration-300 ease-in-out scale-95 md:scale-100">
+              <h1 className="text-3xl md:text-5xl font-extrabold text-green-700 mb-4">Kings Polytechnic Online</h1>
+              <p className="text-base md:text-lg text-gray-700 mb-6">
+                You have successfully completed the Blood Smear Preparation module, including the simulation, video demonstration, and knowledge check!
+              </p>
+              <p className="text-2xl md:text-3xl font-bold text-green-800 mb-8">
+                Final Score: {score} points!
+              </p>
+              <button
+                onClick={resetSimulation}
+                className="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-8 rounded-full shadow-lg transition-transform transform hover:scale-105 focus:outline-none focus:ring-4 focus:ring-green-300 text-lg md:text-xl"
+              >
+                Restart Simulation
+              </button>
+            </div>
+          </div>
+        )}
+      </main>
+
+      {/* Footer */}
+      <footer className="mt-10 text-center text-xs text-gray-500 opacity-70">
+        &copy; {new Date().getFullYear()} Kings Polytechnic Online | Virtual Laboratory Practical
+      </footer>
     </div>
   );
 }
 
-/*
-===============================================================================
-NOTES ON ARCHITECTURE & NEXT STEPS FOR EXPANSION
-===============================================================================
-
-- 3D objects are basic Three.js primitives for fast load and clarity; 
-  replace with detailed models for realism as needed.
-- Object picking and drag-n-drop is handled using Three.js raycasting.
-- State management uses React; for multiple modules, consider splitting out logic.
-- Procedure logic (validation, step progression) is data-driven (see PROCEDURE array).
-- Sound effects: Simple chimes/clicks with Tone.js (no external assets).
-- For additional equipment/interactions: expand the PROCEDURE array and implement logic in handlers.
-- For avatars/avatars with worn gear, add a humanoid mesh and update its material/state.
-- For fume hood, eyewash, add similar models and procedure steps.
-- For more immersive UI, add "hotspot" highlights or glowing effects to correct objects on each step.
-
-===============================================================================
-*/
+export default App;
